@@ -14,6 +14,7 @@ import (
 type RouterDeps struct {
 	Logger    *slog.Logger
 	DBChecker DBChecker
+	Store     StreamStore
 }
 
 // NewRouter sets up the Chi HTTP router with production-ready middleware and routes.
@@ -32,6 +33,17 @@ func NewRouter(deps RouterDeps) *chi.Mux {
 
 	// Prometheus Metrics endpoint
 	r.Handle("/api/v1/metrics", promhttp.Handler())
+
+	// Streams and Ingestion API endpoints
+	if deps.Store != nil {
+		r.Route("/api/v1", func(apiRouter chi.Router) {
+			apiRouter.Post("/streams", CreateStreamHandler(deps.Store, deps.Logger))
+			apiRouter.Get("/streams", ListStreamsHandler(deps.Store, deps.Logger))
+			apiRouter.Get("/streams/{name}", GetStreamHandler(deps.Store, deps.Logger))
+			apiRouter.Post("/streams/{name}/events", IngestEventsHandler(deps.Store, deps.Logger))
+			apiRouter.Get("/streams/{name}/events", QueryEventsHandler(deps.Store, deps.Logger))
+		})
+	}
 
 	return r
 }

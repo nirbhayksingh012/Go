@@ -13,6 +13,8 @@ import (
 
 	"github.com/snowstream/snowstream/internal/api"
 	"github.com/snowstream/snowstream/internal/config"
+	"github.com/snowstream/snowstream/internal/db"
+	"github.com/snowstream/snowstream/internal/worker"
 )
 
 func main() {
@@ -41,9 +43,52 @@ func main() {
 		slog.Int("worker_count", cfg.WorkerCount),
 	)
 
+	// Initialize PostgreSQL connection pool
+	dbCtx, dbCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dbCancel()
+
+	dbPool, err := db.New(dbCtx, db.DefaultConfig(cfg.DatabaseURL), logger)
+	if err != nil {
+		logger.Error("failed to initialize database pool", slog.String("error", err.Error()))
+		os.Exit(1)
+	}
+	defer dbPool.Close()
+
+	// Initial connectivity probe (non-blocking for development if DB is not yet booted)
+	if err := dbPool.PingContext(dbCtx); err != nil {
+		logger.Warn("initial database ping failed (health checks will report DEGRADED until DB is online)",
+			slog.String("error", err.Error()),
+			slog.String("database_url", cfg.DatabaseURL),
+		)
+	} else {
+		logger.Info("database connection established successfully")
+
+		// Apply database schema migrations
+		if err := dbPool.Migrate(dbCtx); err != nil {
+			logger.Error("failed to apply database migrations", slog.String("error", err.Error()))
+			os.Exit(1)
+		}
+		logger.Info("database schema migrations applied successfully")
+	}
+
+	// Initialize background worker pool
+	workerPool := worker.NewPool(worker.Config{
+		WorkerCount:   cfg.WorkerCount,
+		PollInterval:  cfg.PollInterval,
+		LeaseDuration: cfg.LeaseDuration,
+	}, dbPool, logger)
+
+	workerPool.RegisterHandler(worker.JobTypeMaterializedViewRefresh, worker.DefaultMaterializedViewRefreshHandler(logger))
+	workerPool.RegisterHandler(worker.JobTypeRetentionCleanup, worker.DefaultRetentionCleanupHandler(logger))
+
+	workerCtx, cancelWorkers := context.WithCancel(context.Background())
+	defer cancelWorkers()
+	workerPool.Start(workerCtx)
+
 	router := api.NewRouter(api.RouterDeps{
 		Logger:    logger,
-		DBChecker: nil, // Will be wired to pgx pool in Phase 2
+		DBChecker: dbPool,
+		Store:     dbPool,
 	})
 
 	server := &http.Server{
@@ -70,9 +115,13 @@ func main() {
 	select {
 	case err := <-serverErrors:
 		logger.Error("server failed to start", slog.String("error", err.Error()))
+		workerPool.Stop()
 		os.Exit(1)
 	case sig := <-shutdownSignal:
 		logger.Info("shutdown signal received", slog.String("signal", sig.String()))
+
+		// Gracefully drain background workers
+		workerPool.Stop()
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()

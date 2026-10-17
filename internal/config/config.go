@@ -27,7 +27,7 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Environment:    getEnv("ENVIRONMENT", "development"),
 		ServerPort:     getEnv("PORT", "8080"),
-		DatabaseURL:    getEnv("DATABASE_URL", "postgres://postgres@localhost:5432/snowstream_dev?sslmode=disable"),
+		DatabaseURL:    getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/snowstream_dev?sslmode=disable"),
 		WorkerCount:    getEnvAsInt("WORKER_COUNT", 4),
 		JobQueueSize:   getEnvAsInt("JOB_QUEUE_SIZE", 100),
 		PollInterval:   getEnvAsDuration("POLL_INTERVAL", 500*time.Millisecond),
